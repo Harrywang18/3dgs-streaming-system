@@ -1,1 +1,147 @@
-# 3dgs-streaming-system
+
+# 3DGS-Streaming-System
+
+## Overview
+
+This repository provides a complete pipeline for progressive 3D Gaussian Splatting (3DGS) streaming, including:
+
+1. 3DGS training (layered or non-layered) using Lapis-GS  
+2. Spatial cuboid partition and optional layer partition using SGSS  
+3. Progressive transmission and WebXR rendering using Spark  
+
+Pipeline:
+
+Multi-view Images  
+→ Lapis-GS (Train 3DGS)  
+→ SGSS (Cuboid Partition + Optional Layer Split)  
+→ Spark (Progressive Streaming & Rendering)
+
+This repository does NOT include pretrained checkpoints or datasets.
+
+---
+
+# Part 1 – Lapis-GS: Dataset Preparation & 3DGS Training
+
+Directory:
+lapis-gs/
+
+## 1.1 Environment Setup
+
+Follow instructions in:
+lapis-gs/README.md
+
+Create environment:
+conda env create -f environment.yml
+conda activate lapis-gs
+
+## 1.2 Dataset Preparation
+
+Prepare dataset in COLMAP format or follow Lapis-GS instructions.
+
+Optional helper script:
+lapis-gs/dataset_prepare.sh
+
+## 1.3 Train 3DGS
+
+Run:
+lapis-gs/train_full_pipeline.sh
+
+### Non-layered 3DGS
+
+In train_full_pipeline.py:
+resolution_scales = [2]
+
+### Layered 3DGS
+
+Modify:
+resolution_scales = [16, 8, 4, 2, 1]
+
+## 1.4 Export Highest Resolution 3DGS
+
+Export the highest-resolution 3DGS model (.ply) for cuboid partition.
+
+---
+
+# Part 2 – SGSS: Cuboid & Layer Partition
+
+Directory:
+SGSS/
+
+## 2.1 Cuboid Partition
+
+Run:
+SGSS/run_all_scripts_detail.sh
+
+Outputs:
+- Cuboid PLY files
+- voxel_ilp.json
+
+## 2.2 Optional: Layer Partition Inside Each Cuboid
+
+If using layered 3DGS:
+SGSS/split_cuboids_to_layers_360.sh
+
+## 2.3 Prepare Data for Streaming
+
+Collect:
+- All cuboid PLY (or cuboid × layer PLY)
+- voxel_ilp.json
+
+Example structure:
+
+room_data/
+    cuboid_000.ply
+    cuboid_001.ply
+    voxel_ilp.json
+
+---
+
+# Part 3 – Spark: Progressive Streaming & WebXR Rendering
+
+Directory:
+spark/
+
+## 3.1 Environment Setup
+
+Follow:
+spark/README.md
+
+Install:
+npm install
+
+## 3.2 Start HTTPS Server
+
+Spark requires HTTPS:
+
+npm run dev
+
+## 3.3 Example Modes
+
+spark/examples/room_cuboids  
+spark/examples/room_progressive  
+spark/examples/webxr  
+
+## 3.4 Configure Data Path
+
+In index.html:
+
+const CUBOID_PLY_DIR = "your_directory/";
+const CUBOID_INDEX_URL = "your_directory/voxel_ilp.json";
+
+---
+
+# Optional – Convert PLY to SOG
+
+Run:
+spark/convert_ply_to_sog.sh
+
+Environment setup:
+https://github.com/playcanvas/splat-transform
+
+---
+
+# Notes
+
+- Pretrained models are not included.
+- Do not commit large PLY files or checkpoints.
+- Ensure .gitignore excludes datasets and weights.
