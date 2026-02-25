@@ -1,0 +1,60 @@
+############################
+# Data / Outputs
+############################
+data/
+datasets/
+assets/
+outputs/
+results/
+logs/
+runs/
+tmp/
+cache/
+
+############################
+# Checkpoints / Weights
+############################
+*.ckpt
+*.pth
+*.pt
+*.pkl
+*.npz
+*.npy
+*.png
+checkpoints/
+weights/
+models/
+
+############################
+# Large 3D files
+############################
+*.ply
+*.sog
+*.zip
+*.tar
+*.tar.gz
+
+############################
+# Python
+############################
+__pycache__/
+*.pyc
+*.pyo
+*.egg-info/
+build/
+dist/
+.venv/
+.env/
+
+############################
+# Node / Spark
+############################
+node_modules/
+npm-debug.log*
+
+############################
+# IDE
+############################
+.vscode/
+.idea/
+.DS_Store
