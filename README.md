@@ -21,7 +21,6 @@ SGSS (Cuboid Partition + Optional Layer Split)
 Spark (Progressive Streaming & Rendering)
 ```
 
-This repository does **NOT** include pretrained checkpoints or datasets.
 
 ---
 
