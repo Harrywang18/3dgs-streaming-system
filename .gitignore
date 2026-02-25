@@ -20,7 +20,7 @@ cache/
 *.pkl
 *.npz
 *.npy
-*.png
+# *.png
 checkpoints/
 weights/
 models/
