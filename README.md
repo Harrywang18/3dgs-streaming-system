@@ -3,13 +3,18 @@
 
 ## Overview
 
-This repository provides a complete pipeline for progressive 3D Gaussian Splatting (3DGS) streaming, including:
+This repository presents a complete end-to-end system for progressive 3D Gaussian Splatting (3DGS) streaming.  
+The system integrates representation learning, spatial partitioning, and progressive transmission into a unified pipeline designed for bandwidth-adaptive and interactive rendering scenarios (e.g., WebXR).
 
-1. **3DGS training (layered or non-layered)** using Lapis-GS  
-2. **Spatial cuboid partition and optional layer partition** using SGSS  
-3. **Progressive transmission and WebXR rendering** using Spark  
+The pipeline consists of three main components:
 
-Pipeline:
+1. **3DGS training (layered or non-layered)** using Lapis-GS  ([original repository](https://github.com/nus-vv-streams/lapis-gs))  
+
+2. **Spatial cuboid partition and optional intra-cuboid layer partition** using SGSS  ([original repository](https://github.com/symmru/SGSS))  
+
+3. **Progressive transmission and WebXR rendering** using Spark  ([original repository](https://github.com/sparkjsdev/spark))
+
+The overall workflow is illustrated below:
 
 ```
 Multi-view Images
@@ -25,6 +30,9 @@ Spark (Progressive Streaming & Rendering)
 ---
 
 # Part 1 – Lapis-GS: Dataset Preparation & 3DGS Training
+
+This stage trains a 3D Gaussian Splatting representation from multi-view images.  
+Both single-scale (non-layered) and multi-scale (layered) configurations are supported.
 
 Directory:
 
@@ -79,13 +87,12 @@ Modify:
 resolution_scales = [16, 8, 4, 2, 1]
 ```
 
-## 1.4 Export Highest Resolution 3DGS
-
-Export the highest-resolution 3DGS model (`.ply`) for cuboid partition.
-
 ---
 
 # Part 2 – SGSS: Cuboid & Layer Partition
+
+After obtaining the trained 3DGS model, we spatially partition the scene into cuboids for streaming efficiency.  
+For layered 3DGS representations, optional intra-cuboid layer partition can be performed to enable finer-grained progressive transmission.
 
 Directory:
 
@@ -126,6 +133,9 @@ room_data/
 ---
 
 # Part 3 – Spark: Progressive Streaming & WebXR Rendering
+
+In the final stage, cuboid (or cuboid × layer) units are progressively transmitted and rendered using Spark.  
+This enables viewport-aware streaming and interactive WebXR visualization under bandwidth constraints.
 
 Directory:
 
@@ -186,11 +196,12 @@ https://github.com/playcanvas/splat-transform
 
 # Third-Party Code Notice
 
-Parts of this repository are derived from or based on the following open-source projects:
+This project integrates and extends several open-source projects, including:
 
 - Lapis-GS: https://github.com/nus-vv-streams/lapis-gs
 - SGSS: https://github.com/symmru/SGSS
 - Spark: https://github.com/sparkjsdev/spark
 
-Original licenses are preserved in their respective subdirectories where applicable.
+We acknowledge the original authors for their contributions.  
+Original licenses and copyright notices are preserved where applicable.
 
