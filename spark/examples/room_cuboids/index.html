@@ -1,0 +1,455 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spark • WebXR</title>
+  <style>
+    body { margin: 0; }
+    #status{
+      position:fixed; top:10px; right:10px;
+      padding:8px 10px; font:12px/1.2 sans-serif;
+      background:rgba(0,0,0,0.55); color:#fff;
+      border-radius:8px; z-index:10;
+      white-space:pre; user-select:none; pointer-events:none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="status">Loading: init</div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.174.0/three.module.js",
+        "@sparkjsdev/spark": "./spark.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import {
+      SparkRenderer, SplatMesh,
+      SplatEdit, SplatEditRgbaBlendMode, SplatEditSdf, SplatEditSdfType,
+      VRButton, XrHands
+    } from "@sparkjsdev/spark";
+
+    // -----------------------------
+    // UI
+    // -----------------------------
+    const statusEl = document.getElementById("status");
+    const setStatus = (s) => statusEl.textContent = s;
+
+    // -----------------------------
+    // Scene / XR
+    // -----------------------------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.2, 1000);
+
+    const renderer = new THREE.WebGLRenderer();
+    renderer.xr.enabled = true;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Local frame (Quest / Vision Pro stability hack)
+    const localFrame = new THREE.Group();
+    scene.add(localFrame);
+
+    const spark = new SparkRenderer({ renderer, maxStdDev: Math.sqrt(5) });
+    localFrame.add(spark);
+    localFrame.add(camera);
+
+    const splatRoot = localFrame;
+
+    // -----------------------------
+    // Transform alignment
+    // -----------------------------
+    const MESH_SCALE = 0.5;
+    const BBOX_SCALE = 0.5;
+
+    function applyTransform(m) {
+      m.quaternion.set(1, 0, 0, 0);
+      m.scale.setScalar(MESH_SCALE);
+      // m.position.y -= 0.5;
+      return m;
+    }
+
+
+    function transformAABB(minArr, maxArr, quat, scale, pos) {
+        const min = new THREE.Vector3(minArr[0], minArr[1], minArr[2]);
+        const max = new THREE.Vector3(maxArr[0], maxArr[1], maxArr[2]);
+
+        const corners = [
+            new THREE.Vector3(min.x, min.y, min.z),
+            new THREE.Vector3(min.x, min.y, max.z),
+            new THREE.Vector3(min.x, max.y, min.z),
+            new THREE.Vector3(min.x, max.y, max.z),
+            new THREE.Vector3(max.x, min.y, min.z),
+            new THREE.Vector3(max.x, min.y, max.z),
+            new THREE.Vector3(max.x, max.y, min.z),
+            new THREE.Vector3(max.x, max.y, max.z),
+        ];
+
+        const outMin = new THREE.Vector3(+Infinity, +Infinity, +Infinity);
+        const outMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
+        for (const p of corners) {
+            // p' = (R * p) * s + t
+            p.applyQuaternion(quat);
+            p.multiplyScalar(scale);
+            p.add(pos);
+
+            outMin.min(p);
+            outMax.max(p);
+        }
+
+        return new THREE.Box3(outMin, outMax);
+    }
+
+
+    // -----------------------------
+    // Cuboid index (voxel_ilp.json)
+    // -----------------------------
+
+    function getSceneFromUrl(defaultScene = "room") {
+        const sp = new URLSearchParams(window.location.search);
+        const s = sp.get("scene");
+        const ALLOW = new Set(["bonsai", "garden", "room", "flowers"]);
+        if (s && ALLOW.has(s)) return s;
+        return defaultScene;
+    }
+
+    const SCENE = getSceneFromUrl("room");
+    const CUBOID_INDEX_URL = `./optimal_voxels_${SCENE}/voxel_ilp.json`;
+    const CUBOID_PLY_DIR = `./optimal_voxels_${SCENE}_sogs`;
+
+
+
+
+    function cuboidIdToUrl(id) {
+      return `${CUBOID_PLY_DIR}/${id}.sog`;
+    }
+
+    // id -> { box: THREE.Box3, center: THREE.Vector3, meta: {...} }
+    const cuboids = new Map();
+    const cuboidIds = [];
+
+    function scaledVec3(arr, s) {
+      return new THREE.Vector3(arr[0] * s, arr[1] * s, arr[2] * s);
+    }
+
+    async function loadCuboidIndex() {
+      setStatus("Loading voxel_ilp.json ...");
+      const resp = await fetch(CUBOID_INDEX_URL);
+      if (!resp.ok) throw new Error(`Failed to load ${CUBOID_INDEX_URL}: ${resp.status}`);
+      const json = await resp.json();
+
+      cuboids.clear();
+      cuboidIds.length = 0;
+
+      for (const [id, info] of Object.entries(json)) {
+        const quat = new THREE.Quaternion(1, 0, 0, 0);
+        const pos  = new THREE.Vector3(0, 0, 0);
+        const scale = MESH_SCALE;
+
+        const box = transformAABB(info.leftBottom, info.rightTop, quat, scale, pos);
+
+        // const min = scaledVec3(info.leftBottom, BBOX_SCALE);
+        // const max = scaledVec3(info.rightTop, BBOX_SCALE);
+        // const box = new THREE.Box3(min, max);
+        const center = box.getCenter(new THREE.Vector3());
+        cuboids.set(id, { box, center, info });
+        cuboidIds.push(id);
+      }
+
+      setStatus(`Index loaded\nCuboids: ${cuboidIds.length}`);
+    }
+
+    // -----------------------------
+    // Viewport (frustum) test
+    // -----------------------------
+    const frustum = new THREE.Frustum();
+    const projView = new THREE.Matrix4();
+
+    function updateFrustumFromCamera(cam) {
+      cam.updateMatrixWorld(true);
+      projView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(projView);
+    }
+
+    function getXrCameraWorldPos(xrCam, out) {
+      xrCam.updateMatrixWorld(true);
+      return out.setFromMatrixPosition(xrCam.matrixWorld);
+    }
+
+    // -----------------------------
+    // Streaming state
+    // -----------------------------
+    const STREAM_HZ = 10;
+    const STREAM_DT = 1000 / STREAM_HZ;
+
+    const MAX_INFLIGHT = 3;          
+    const MAX_REQUEST_PER_TICK = 10;
+    const KEEP_LOADED = 80;         
+
+    // id -> SplatMesh
+    const loadedMeshes = new Map();
+    // key(id) -> Promise
+    const inflight = new Map();
+    let inflightCount = 0;
+
+    function fmtMB(bytes) { return (bytes / (1024 * 1024)).toFixed(2); }
+
+    async function fetchToBlobWithProgress(url, label) {
+      const resp = await fetch(url, { cache: "force-cache" });
+      if (!resp.ok) throw new Error(`Fetch failed ${url}: ${resp.status}`);
+
+      const total = Number(resp.headers.get("content-length") || 0);
+      const reader = resp.body?.getReader?.();
+      if (!reader) {
+        const blob = await resp.blob();
+        setStatus(`⏳ ${label}\nDownloaded ${fmtMB(blob.size)} MB`);
+        return blob;
+      }
+
+      let received = 0;
+      const chunks = [];
+      let lastUi = 0;
+      const t0 = performance.now();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+
+        const now = performance.now();
+        if (now - lastUi > 120) {
+          lastUi = now;
+          const elapsed = (now - t0) / 1000;
+          const speed = received / Math.max(elapsed, 1e-6);
+          if (total > 0) {
+            const pct = ((received / total) * 100).toFixed(1);
+            setStatus(
+              `⏳ ${label}\n` +
+              `Downloading: ${pct}%\n` +
+              `${fmtMB(received)} / ${fmtMB(total)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          } else {
+            setStatus(
+              `⏳ ${label}\n` +
+              `Downloading...\n` +
+              `${fmtMB(received)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          }
+        }
+      }
+
+      return new Blob(chunks);
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function acquireSlot() {
+      while (inflightCount >= MAX_INFLIGHT) await sleep(10);
+      inflightCount++;
+    }
+    function releaseSlot() {
+      inflightCount--;
+    }
+
+    async function loadCuboidMesh(id) {
+      if (loadedMeshes.has(id)) return loadedMeshes.get(id);
+
+      const key = `cuboid:${id}`;
+      if (inflight.has(key)) return await inflight.get(key);
+
+      const url = cuboidIdToUrl(id);
+      const label = `Cuboid ${id}`;
+
+      const p = (async () => {
+        await acquireSlot();
+        try {
+      
+          const blob = await fetchToBlobWithProgress(url, label );
+          const blobUrl = URL.createObjectURL(blob);
+
+          setStatus(`⏳ ${label}\nBuilding GPU buffers...\n${fmtMB(blob.size)} MB`);
+
+          const mesh = applyTransform(new SplatMesh({ url: blobUrl }));
+          splatRoot.add(mesh);
+
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+
+          loadedMeshes.set(id, mesh);
+          return mesh;
+        } finally {
+          releaseSlot();
+          inflight.delete(key);
+        }
+      })();
+
+      inflight.set(key, p);
+      return await p;
+    }
+
+
+    function unloadCuboid(id) {
+      const mesh = loadedMeshes.get(id);
+      if (!mesh) return;
+      splatRoot.remove(mesh);
+      loadedMeshes.delete(id);
+    }
+
+    // -----------------------------
+    // Main streaming tick
+    // -----------------------------
+    let lastStreamCheck = 0;
+    const tmpCamPos = new THREE.Vector3();
+
+    function streamTick(time) {
+      if (cuboidIds.length === 0) return;
+      if (time - lastStreamCheck < STREAM_DT) return;
+      lastStreamCheck = time;
+
+      const xrCam = renderer.xr.getCamera(camera); // XR: ArrayCamera
+      updateFrustumFromCamera(xrCam);
+
+      const camPos = getXrCameraWorldPos(xrCam, tmpCamPos);
+
+      if (loadedMeshes.size === cuboidIds.length) {
+        return;
+      }
+      const visible = [];
+      for (const id of cuboidIds) {
+        const c = cuboids.get(id);
+        if (!c) continue;
+        const PADDING = 0.15; 
+        const paddedBox = c.box.clone().expandByScalar(PADDING);
+        if (frustum.intersectsBox(paddedBox)) visible.push(id);
+      }
+
+      visible.sort((a, b) => {
+        const da = cuboids.get(a).center.distanceTo(camPos);
+        const db = cuboids.get(b).center.distanceTo(camPos);
+        return da - db;
+      });
+
+      let requested = 0;
+      for (const id of visible) {
+        if (requested >= MAX_REQUEST_PER_TICK) break;
+        if (loadedMeshes.has(id)) continue;
+        loadCuboidMesh(id); // fire-and-forget
+        requested++;
+      }
+
+      
+      setStatus(
+        `Cuboids: ${cuboidIds.length}\n` +
+        `Visible: ${visible.length}\n` +
+        `Loaded: ${loadedMeshes.size}\n` +
+        `Inflight: ${inflightCount}\n` +
+        `Req/tick: ${requested}`
+      );
+    }
+
+    // -----------------------------
+    // WebXR hand tracking + SDF edits 
+    // -----------------------------
+    const vrButton = VRButton.createButton(renderer, {
+      optionalFeatures: ["hand-tracking"],
+    });
+
+    let xrHands = null;
+    if (vrButton) {
+      document.body.appendChild(vrButton);
+      xrHands = new XrHands();
+      const handMesh = xrHands.makeGhostMesh();
+      handMesh.editable = false;
+      localFrame.add(handMesh);
+    }
+
+    const edit = new SplatEdit({
+      rgbaBlendMode: SplatEditRgbaBlendMode.ADD_RGBA,
+      sdfSmooth: 0.02,
+      softEdge: 0.02,
+    });
+    localFrame.add(edit);
+
+    const sdfs = new Map();
+    let lastCameraPos = new THREE.Vector3(0, 0, 0);
+
+    renderer.setAnimationLoop(function animate(time, xrFrame) {
+
+      if (lastCameraPos.distanceTo(camera.position) > 0.5) {
+        localFrame.position.copy(camera.position).multiplyScalar(-1);
+      }
+      lastCameraPos.copy(camera.position);
+
+      if (xrHands) {
+        xrHands.update({ xr: renderer.xr, xrFrame });
+
+        for (const hand of ["left", "right"]) {
+          for (const [index, tip] of ["t3", "i4", "m4", "r4", "p4"].entries()) {
+            const key = `${hand}-${tip}`;
+            if (!sdfs.has(key)) {
+              const sdf = new SplatEditSdf({
+                type: SplatEditSdfType.SPHERE,
+                radius: 0.03,
+                color: new THREE.Color(
+                  (index % 5 < 3) ? 1 : 0,
+                  (index % 5 % 2),
+                  ((index % 5) > 1) ? 1 : 0
+                ),
+                opacity: 0,
+              });
+              sdfs.set(key, sdf);
+            }
+
+            const sdf = sdfs.get(key);
+            sdf.displace.set(
+              0.01 * Math.sin(time * 0.007 + index * 1),
+              0.01 * Math.sin(time * 0.002 + index * 2),
+              0.01 * Math.sin(time * 0.009 + index * 3),
+            );
+
+            if (xrHands.hands[hand] && xrHands.hands[hand][tip]) {
+              sdf.position.copy(xrHands.hands[hand][tip].position);
+              edit.add(sdf);
+            } else {
+              edit.remove(sdf);
+            }
+          }
+        }
+      }
+
+      // ✅ viewport-based cuboid streaming
+      streamTick(time);
+
+      renderer.render(scene, camera);
+    });
+
+    // -----------------------------
+    // Boot
+    // -----------------------------
+    try {
+      await loadCuboidIndex();
+      setStatus("Move your head to load visible cuboids...");
+    } catch (e) {
+      setStatus(`Index error\n${e.message}`);
+      throw e;
+    }
+  </script>
+</body>
+</html>

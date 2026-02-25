@@ -1,0 +1,676 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spark • WebXR</title>
+  <style>
+    body { margin: 0; }
+    #status{
+      position:fixed; top:10px; right:10px;
+      padding:8px 10px; font:12px/1.2 sans-serif;
+      background:rgba(0,0,0,0.55); color:#fff;
+      border-radius:8px; z-index:10;
+      white-space:pre; user-select:none; pointer-events:none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="status">Loading: init</div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.174.0/three.module.js",
+        "@sparkjsdev/spark": "./spark.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import {
+      SparkRenderer, SplatMesh,
+      SplatEdit, SplatEditRgbaBlendMode, SplatEditSdf, SplatEditSdfType,
+      VRButton, XrHands, PackedSplats
+    } from "@sparkjsdev/spark";
+
+    // -----------------------------
+    // UI
+    // -----------------------------
+    const statusEl = document.getElementById("status");
+    const setStatus = (s) => statusEl.textContent = s;
+
+    // -----------------------------
+    // Scene / XR
+    // -----------------------------
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.2, 1000);
+
+    const renderer = new THREE.WebGLRenderer({ antialias: false });
+
+    renderer.xr.enabled = true;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 1.0)); 
+    renderer.xr.setFoveation?.(1.0); 
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Local frame (Quest / Vision Pro stability hack)
+    const localFrame = new THREE.Group();
+    scene.add(localFrame);
+
+    const spark = new SparkRenderer({ renderer, maxStdDev: Math.sqrt(5) });
+    localFrame.add(spark);
+    localFrame.add(camera);
+
+    const splatRoot = localFrame;
+
+   
+    const MESH_SCALE = 0.5;
+    const BBOX_SCALE = 0.5;
+    function applyTransform(m) {
+      m.quaternion.set(1, 0, 0, 0);
+      m.scale.setScalar(MESH_SCALE);
+      // m.position.y -= 0.5;
+      return m;
+    }
+
+
+    function transformAABB(minArr, maxArr, quat, scale, pos) {
+        const min = new THREE.Vector3(minArr[0], minArr[1], minArr[2]);
+        const max = new THREE.Vector3(maxArr[0], maxArr[1], maxArr[2]);
+
+        const corners = [
+            new THREE.Vector3(min.x, min.y, min.z),
+            new THREE.Vector3(min.x, min.y, max.z),
+            new THREE.Vector3(min.x, max.y, min.z),
+            new THREE.Vector3(min.x, max.y, max.z),
+            new THREE.Vector3(max.x, min.y, min.z),
+            new THREE.Vector3(max.x, min.y, max.z),
+            new THREE.Vector3(max.x, max.y, min.z),
+            new THREE.Vector3(max.x, max.y, max.z),
+        ];
+
+        const outMin = new THREE.Vector3(+Infinity, +Infinity, +Infinity);
+        const outMax = new THREE.Vector3(-Infinity, -Infinity, -Infinity);
+
+        for (const p of corners) {
+            // p' = (R * p) * s + t
+            p.applyQuaternion(quat);
+            p.multiplyScalar(scale);
+            p.add(pos);
+
+            outMin.min(p);
+            outMax.max(p);
+        }
+
+        return new THREE.Box3(outMin, outMax);
+    }
+
+
+    // -----------------------------
+    // Cuboid index (voxel_ilp.json)
+    // -----------------------------
+
+    const SCENE = "bonsai"; 
+
+    const CUBOID_INDEX_URL = `./layered_pure_streaming_cuboids_${SCENE}/voxel_ilp.json`;
+
+
+    const CUBOID_PLY_DIR = `./layered_pure_streaming_cuboids_${SCENE}_sogs`;
+
+    
+
+
+    // id -> { box: THREE.Box3, center: THREE.Vector3, meta: {...} }
+    const cuboids = new Map();
+    const cuboidIds = [];
+
+    const NUM_LAYERS = 3;
+    const MAX_LAYER = NUM_LAYERS - 1;
+
+    function cuboidLayerToUrl(id, layer) {
+      // layer: 0..MAX_LAYER
+      return `${CUBOID_PLY_DIR}/${id}-L${layer}.sog`;
+    }
+
+    // loadedLayers.get(id) -> boolean[4]
+    const loadedLayers = new Map();
+    // inflight key: `cuboid:${id}:L${layer}` -> Promise
+
+
+    const Stage = {
+      VIEWPORT_L0: 0,
+      REST_L0: 1,
+      VIEWPORT_ENHANCE: 2,
+    };
+
+    let stage = Stage.VIEWPORT_L0;
+
+  
+    let enhanceTargetLayer = 1; // 1..3
+
+
+
+    function scaledVec3(arr, s) {
+      return new THREE.Vector3(arr[0] * s, arr[1] * s, arr[2] * s);
+    }
+
+    async function loadCuboidIndex() {
+      setStatus("Loading voxel_ilp.json ...");
+      const resp = await fetch(CUBOID_INDEX_URL);
+      if (!resp.ok) throw new Error(`Failed to load ${CUBOID_INDEX_URL}: ${resp.status}`);
+      const json = await resp.json();
+
+      cuboids.clear();
+      cuboidIds.length = 0;
+      loadedLayers.clear();  
+
+      for (const [id, info] of Object.entries(json)) {
+        const quat = new THREE.Quaternion(1, 0, 0, 0);
+        const pos  = new THREE.Vector3(0, 0, 0);
+        const scale = MESH_SCALE;
+
+        const box = transformAABB(info.leftBottom, info.rightTop, quat, scale, pos);
+        const center = box.getCenter(new THREE.Vector3());
+
+        cuboids.set(id, { box, center, info });
+        cuboidIds.push(id);
+
+       
+        loadedLayers.set(id, Array(NUM_LAYERS).fill(false));
+      }
+
+      setStatus(`Index loaded\nCuboids: ${cuboidIds.length}`);
+    }
+
+
+    // -----------------------------
+    // Viewport (frustum) test
+    // -----------------------------
+    const frustum = new THREE.Frustum();
+    const projView = new THREE.Matrix4();
+
+    function updateFrustumFromCamera(cam) {
+      cam.updateMatrixWorld(true);
+      projView.multiplyMatrices(cam.projectionMatrix, cam.matrixWorldInverse);
+      frustum.setFromProjectionMatrix(projView);
+    }
+
+    function getXrCameraWorldPos(xrCam, out) {
+      xrCam.updateMatrixWorld(true);
+      return out.setFromMatrixPosition(xrCam.matrixWorld);
+    }
+
+    // -----------------------------
+    // Streaming state
+    // -----------------------------
+    const STREAM_HZ = 10;
+    const STREAM_DT = 1000 / STREAM_HZ;
+
+    const MAX_INFLIGHT = 3;         
+    const MAX_REQUEST_PER_TICK = 10; 
+    const KEEP_LOADED = 80;          
+
+    // id -> SplatMesh
+    const loadedMeshes = new Map();
+    // key(id) -> Promise
+    const inflight = new Map();
+    let inflightCount = 0;
+
+    function fmtMB(bytes) { return (bytes / (1024 * 1024)).toFixed(2); }
+
+    async function fetchToBlobWithProgress(url, label) {
+      const resp = await fetch(url, { cache: "force-cache" });
+      if (!resp.ok) throw new Error(`Fetch failed ${url}: ${resp.status}`);
+
+      const total = Number(resp.headers.get("content-length") || 0);
+      const reader = resp.body?.getReader?.();
+      if (!reader) {
+        const blob = await resp.blob();
+        setStatus(`⏳ ${label}\nDownloaded ${fmtMB(blob.size)} MB`);
+        return blob;
+      }
+
+      let received = 0;
+      const chunks = [];
+      let lastUi = 0;
+      const t0 = performance.now();
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+
+        const now = performance.now();
+        if (now - lastUi > 120) {
+          lastUi = now;
+          const elapsed = (now - t0) / 1000;
+          const speed = received / Math.max(elapsed, 1e-6);
+          if (total > 0) {
+            const pct = ((received / total) * 100).toFixed(1);
+            setStatus(
+              `⏳ ${label}\n` +
+              `Downloading: ${pct}%\n` +
+              `${fmtMB(received)} / ${fmtMB(total)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          } else {
+            setStatus(
+              `⏳ ${label}\n` +
+              `Downloading...\n` +
+              `${fmtMB(received)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          }
+        }
+      }
+
+      return new Blob(chunks);
+    }
+
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
+
+    async function acquireSlot() {
+      while (inflightCount >= MAX_INFLIGHT) await sleep(10);
+      inflightCount++;
+    }
+    function releaseSlot() {
+      inflightCount--;
+    }
+
+    function isLayerLoaded(id, layer) {
+      const arr = loadedLayers.get(id);
+      return !!arr && arr[layer] === true;
+    }
+
+    async function ensureLowerLayers(id, layer) {
+      for (let l = 0; l < layer; l++) {
+        if (!isLayerLoaded(id, l)) {
+          await loadCuboidLayer(id, l); 
+        }
+      }
+    }
+
+    async function loadCuboidLayer(id, layer) {
+
+      if (isLayerLoaded(id, layer)) return;
+
+      const key = `cuboid:${id}:L${layer}`;
+      if (inflight.has(key)) return await inflight.get(key);
+
+      const p = (async () => {
+
+        await ensureLowerLayers(id, layer);
+
+        await acquireSlot();
+        try {
+          const url = cuboidLayerToUrl(id, layer);
+          const label = `Cuboid ${id} L${layer}`;
+
+          const blob = await fetchToBlobWithProgress(url, label);
+          const blobUrl = URL.createObjectURL(blob);
+
+          setStatus(`⏳ ${label}\nBuilding GPU buffers...\n${fmtMB(blob.size)} MB`);
+
+        
+          const mesh = applyTransform(new SplatMesh({ url: blobUrl }));
+          splatRoot.add(mesh);
+
+          pendingMergeMeshes.push(mesh);
+          mergePendingBatch();   
+
+
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+
+
+          loadedLayers.get(id)[layer] = true;
+
+
+          return mesh;
+        } finally {
+          releaseSlot();
+          inflight.delete(key);
+        }
+      })();
+
+      inflight.set(key, p);
+      return await p;
+    }
+
+
+    async function loadCuboidMesh(id) {
+      if (loadedMeshes.has(id)) return loadedMeshes.get(id);
+
+      const key = `cuboid:${id}`;
+      if (inflight.has(key)) return await inflight.get(key);
+
+      const url = cuboidIdToUrl(id);
+      const label = `Cuboid ${id}`;
+
+     
+      const p = (async () => {
+        await acquireSlot();
+        try {
+          
+          const blob = await fetchToBlobWithProgress(url, label );
+          const blobUrl = URL.createObjectURL(blob);
+
+          setStatus(`⏳ ${label}\nBuilding GPU buffers...\n${fmtMB(blob.size)} MB`);
+
+          const mesh = applyTransform(new SplatMesh({ url: blobUrl }));
+          splatRoot.add(mesh);
+
+          setTimeout(() => URL.revokeObjectURL(blobUrl), 60_000);
+
+          loadedMeshes.set(id, mesh);
+          return mesh;
+        } finally {
+          releaseSlot();
+          inflight.delete(key);
+        }
+      })();
+
+      inflight.set(key, p);
+      return await p;
+    }
+
+
+    function unloadCuboid(id) {
+      const mesh = loadedMeshes.get(id);
+      if (!mesh) return;
+      splatRoot.remove(mesh);
+      loadedMeshes.delete(id);
+    }
+
+    // -----------------------------
+    // Main streaming tick
+    // -----------------------------
+    let lastStreamCheck = 0;
+    const tmpCamPos = new THREE.Vector3();
+
+    function allL0Loaded() {
+      for (const id of cuboidIds) {
+        if (!isLayerLoaded(id, 0)) return false;
+      }
+      return true;
+    }
+
+    function countLoadedL0() {
+      let c = 0;
+      for (const id of cuboidIds) if (isLayerLoaded(id, 0)) c++;
+      return c;
+    }
+
+    function streamTick(time) {
+      if (cuboidIds.length === 0) return;
+      if (time - lastStreamCheck < STREAM_DT) return;
+      lastStreamCheck = time;
+
+      const xrCam = renderer.xr.getCamera(camera);
+      updateFrustumFromCamera(xrCam);
+      const camPos = getXrCameraWorldPos(xrCam, tmpCamPos);
+
+
+      const visible = [];
+      for (const id of cuboidIds) {
+        const c = cuboids.get(id);
+        if (!c) continue;
+        const PADDING = 0.15;
+        const paddedBox = c.box.clone().expandByScalar(PADDING);
+        if (frustum.intersectsBox(paddedBox)) visible.push(id);
+      }
+
+      visible.sort((a, b) => {
+        const da = cuboids.get(a).center.distanceTo(camPos);
+        const db = cuboids.get(b).center.distanceTo(camPos);
+        return da - db;
+      });
+
+      let requested = 0;
+
+      if (stage === Stage.VIEWPORT_L0) {
+       
+        for (const id of visible) {
+          if (requested >= MAX_REQUEST_PER_TICK) break;
+          if (isLayerLoaded(id, 0)) continue;
+          loadCuboidLayer(id, 0); 
+          requested++;
+        }
+
+        let allVisibleL0Loaded = true;
+        for (const id of visible) {
+          if (!isLayerLoaded(id, 0)) { allVisibleL0Loaded = false; break; }
+        }
+
+       
+        if (visible.length > 0 && allVisibleL0Loaded) {
+          stage = Stage.REST_L0;
+        }
+
+       
+        setStatus(
+          `Stage: viewport L0 (strict)\n` +
+          `Cuboids: ${cuboidIds.length}\n` +
+          `Visible: ${visible.length}\n` +
+          `Loaded(L0, visible): ${visible.filter(id => isLayerLoaded(id,0)).length}/${visible.length}\n` +
+          `Inflight: ${inflightCount}\n` +
+          `Req/tick: ${requested}`
+        );
+        return;
+      }
+
+
+      else if (stage === Stage.REST_L0) {
+        const remaining = [];
+        for (const id of cuboidIds) {
+          if (!isLayerLoaded(id, 0)) remaining.push(id);
+        }
+        remaining.sort((a, b) => {
+          const da = cuboids.get(a).center.distanceTo(camPos);
+          const db = cuboids.get(b).center.distanceTo(camPos);
+          return da - db;
+        });
+
+        for (const id of remaining) {
+          if (requested >= MAX_REQUEST_PER_TICK) break;
+          loadCuboidLayer(id, 0);
+          requested++;
+        }
+
+        if (allL0Loaded()) {
+          stage = Stage.VIEWPORT_ENHANCE;
+          enhanceTargetLayer = 1;
+        }
+      }
+
+     
+      else if (stage === Stage.VIEWPORT_ENHANCE) {
+
+        for (const id of visible) {
+          if (requested >= MAX_REQUEST_PER_TICK) break;
+
+          
+          if (!isLayerLoaded(id, 0)) continue;
+
+          
+          if (!isLayerLoaded(id, enhanceTargetLayer)) {
+            loadCuboidLayer(id, enhanceTargetLayer);
+            requested++;
+          }
+        }
+
+        let visibleAllDone = true;
+        for (const id of visible) {
+          if (!isLayerLoaded(id, 0)) continue;
+          if (!isLayerLoaded(id, enhanceTargetLayer)) { visibleAllDone = false; break; }
+        }
+        if (visible.length > 0 && visibleAllDone && enhanceTargetLayer < MAX_LAYER) {
+          enhanceTargetLayer++;
+        }
+      }
+
+      setStatus(
+        `Stage: ${stage === 0 ? "viewport L0" : stage === 1 ? "rest L0" : `enhance L${enhanceTargetLayer}`}\n` +
+        `Cuboids: ${cuboidIds.length}\n` +
+        `Visible: ${visible.length}\n` +
+        `L0 loaded: ${countLoadedL0()}/${cuboidIds.length}\n` +
+        `Inflight: ${inflightCount}\n` +
+        `Req/tick: ${requested}`
+      );
+    }
+
+    // import { PackedSplats, SplatMesh } from "@sparkjsdev/spark";
+
+    const MERGE_BATCH = 30;
+    const pendingMergeMeshes = [];
+    const mergedBuckets = [];
+    let merging = false;
+
+    function numSplatsOf(mesh) {
+      return mesh?.packedSplats?.numSplats ?? mesh?.numSplats ?? 0;
+    }
+
+    function mergePackedSplats(meshes) {
+      const total = meshes.reduce((s, m) => s + numSplatsOf(m), 0);
+      const merged = new PackedSplats({ maxSplats: total });
+
+      let offset = 0;
+      for (const m of meshes) {
+        const ps = m.packedSplats;
+        const n = ps.numSplats;
+
+        merged.ensureSplats(offset + n);
+        merged.packedArray.set(ps.packedArray.subarray(0, n * 4), offset * 4);
+        offset += n;
+      }
+      merged.numSplats = total;
+
+      return merged;
+    }
+
+    async function mergePendingBatch() {
+      if (merging) return;
+      if (pendingMergeMeshes.length < MERGE_BATCH) return;
+
+      const batch = pendingMergeMeshes.splice(0, MERGE_BATCH);
+
+      merging = true;
+      try {
+        await Promise.all(batch.map(m => m.initialized));
+
+
+        const mergedPS = mergePackedSplats(batch);
+        const bucketMesh = applyTransform(new SplatMesh({ packedSplats: mergedPS }));
+        splatRoot.add(bucketMesh);
+
+        for (const m of batch) {
+          splatRoot.remove(m);
+          m.dispose?.();
+        }
+
+        mergedBuckets.push({ mesh: bucketMesh, packedSplats: mergedPS, numSplats: mergedPS.numSplats });
+
+      } finally {
+        merging = false;
+      }
+    }
+
+
+
+
+    const vrButton = VRButton.createButton(renderer, {
+      optionalFeatures: ["hand-tracking"],
+    });
+
+    let xrHands = null;
+    if (vrButton) {
+      document.body.appendChild(vrButton);
+      xrHands = new XrHands();
+      const handMesh = xrHands.makeGhostMesh();
+      handMesh.editable = false;
+      localFrame.add(handMesh);
+    }
+
+    const edit = new SplatEdit({
+      rgbaBlendMode: SplatEditRgbaBlendMode.ADD_RGBA,
+      sdfSmooth: 0.02,
+      softEdge: 0.02,
+    });
+    localFrame.add(edit);
+
+    const sdfs = new Map();
+    let lastCameraPos = new THREE.Vector3(0, 0, 0);
+
+    renderer.setAnimationLoop(function animate(time, xrFrame) {
+
+      if (lastCameraPos.distanceTo(camera.position) > 0.5) {
+        localFrame.position.copy(camera.position).multiplyScalar(-1);
+      }
+      lastCameraPos.copy(camera.position);
+
+      if (xrHands) {
+        xrHands.update({ xr: renderer.xr, xrFrame });
+
+        for (const hand of ["left", "right"]) {
+          for (const [index, tip] of ["t3", "i4", "m4", "r4", "p4"].entries()) {
+            const key = `${hand}-${tip}`;
+            if (!sdfs.has(key)) {
+              const sdf = new SplatEditSdf({
+                type: SplatEditSdfType.SPHERE,
+                radius: 0.03,
+                color: new THREE.Color(
+                  (index % 5 < 3) ? 1 : 0,
+                  (index % 5 % 2),
+                  ((index % 5) > 1) ? 1 : 0
+                ),
+                opacity: 0,
+              });
+              sdfs.set(key, sdf);
+            }
+
+            const sdf = sdfs.get(key);
+            sdf.displace.set(
+              0.01 * Math.sin(time * 0.007 + index * 1),
+              0.01 * Math.sin(time * 0.002 + index * 2),
+              0.01 * Math.sin(time * 0.009 + index * 3),
+            );
+
+            if (xrHands.hands[hand] && xrHands.hands[hand][tip]) {
+              sdf.position.copy(xrHands.hands[hand][tip].position);
+              edit.add(sdf);
+            } else {
+              edit.remove(sdf);
+            }
+          }
+        }
+      }
+
+      // ✅ viewport-based cuboid streaming
+      streamTick(time);
+
+      renderer.render(scene, camera);
+    });
+
+    // -----------------------------
+    // Boot
+    // -----------------------------
+    try {
+      await loadCuboidIndex();
+      setStatus("Move your head to load visible cuboids...");
+    } catch (e) {
+      setStatus(`Index error\n${e.message}`);
+      throw e;
+    }
+  </script>
+</body>
+</html>

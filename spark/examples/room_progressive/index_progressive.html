@@ -1,0 +1,250 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Spark • WebXR</title>
+  <style>
+    body { margin: 0; }
+    #status{
+      position:fixed; top:10px; right:10px;
+      padding:8px 10px; font:12px/1.2 sans-serif;
+      background:rgba(0,0,0,0.55); color:#fff;
+      border-radius:8px; z-index:10;
+      white-space:pre; user-select:none; pointer-events:none;
+    }
+  </style>
+</head>
+
+<body>
+  <div id="status">Loading: init</div>
+
+  <script type="importmap">
+    {
+      "imports": {
+        "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.174.0/three.module.js",
+        "@sparkjsdev/spark": "./spark.module.js"
+      }
+    }
+  </script>
+
+  <script type="module">
+    import * as THREE from "three";
+    import {
+      SparkRenderer, SplatMesh,
+      SplatEdit, SplatEditRgbaBlendMode, SplatEditSdf, SplatEditSdfType,
+      VRButton, XrHands
+    } from "@sparkjsdev/spark";
+
+    const statusEl = document.getElementById("status");
+    const setStatus = (s) => statusEl.textContent = s;
+
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1000);
+
+    const renderer = new THREE.WebGLRenderer();
+    renderer.xr.enabled = true;
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    document.body.appendChild(renderer.domElement);
+
+    window.addEventListener("resize", () => {
+      camera.aspect = window.innerWidth / window.innerHeight;
+      camera.updateProjectionMatrix();
+      renderer.setSize(window.innerWidth, window.innerHeight);
+    });
+
+    // Local frame for XR stability
+    const localFrame = new THREE.Group();
+    scene.add(localFrame);
+
+    const spark = new SparkRenderer({ renderer, maxStdDev: Math.sqrt(5) });
+    localFrame.add(spark);
+    localFrame.add(camera);
+
+
+    const LAYERS = [
+      { name: "BASE (res16)", url: "./room_res16.ply", addToScene: true },
+      { name: "Δres8",        url: "./room_delta_res8.ply",  addToScene: true },
+      { name: "Δres4",        url: "./room_delta_res4.ply",  addToScene: true },
+      { name: "Δres2(full)",  url: "./room_delta_res2.ply",  addToScene: true },
+    ];
+
+    const applyTransform = (m) => {
+      m.quaternion.set(1, 0, 0, 0);
+      m.scale.setScalar(0.5);
+      // m.position.y -= 0.5;
+      return m;
+    };
+
+    const loadedMeshes = [];
+
+    
+
+    async function loadAndAddLayer({ name, url }) {
+      const t0 = performance.now();
+      const fmtMB = (bytes) => (bytes / (1024 * 1024)).toFixed(2);
+
+      setStatus(`⏳ ${name}\nStarting...\n${url}`);
+
+      const tFetch0 = performance.now();
+      const resp = await fetch(url);
+      if (!resp.ok) throw new Error(`Fetch failed ${url}: ${resp.status}`);
+
+      const total = Number(resp.headers.get("content-length") || 0);
+      const reader = resp.body?.getReader?.();
+      if (!reader) {
+        const blob = await resp.blob();
+        setStatus(`⏳ ${label}\nDownloaded ${fmtMB(blob.size)} MB`);
+        return blob;
+      }
+
+      let received = 0;
+      const chunks = [];
+      let lastUi = 0;
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        chunks.push(value);
+        received += value.byteLength;
+
+        const now = performance.now();
+        if (now - lastUi > 100) {
+          lastUi = now;
+          const elapsed = (now - tFetch0) / 1000;
+          const speed = received / Math.max(elapsed, 1e-6); // bytes/s
+
+          if (total > 0) {
+            const pct = ((received / total) * 100).toFixed(1);
+            setStatus(
+              `⏳ ${name}\n` +
+              `Downloading: ${pct}%\n` +
+              `${fmtMB(received)} / ${fmtMB(total)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          } else {
+            setStatus(
+              `⏳ ${name}\n` +
+              `Downloading...\n` +
+              `${fmtMB(received)} MB\n` +
+              `${fmtMB(speed)}/s`
+            );
+          }
+        }
+      }
+
+      const blob = new Blob(chunks);
+      const tFetch1 = performance.now();
+      const downloadTime = ((tFetch1 - tFetch0) / 1000).toFixed(2);
+
+      setStatus(`⏳ ${name}\nDownload done: ${downloadTime}s\nBuilding GPU buffers...`);
+
+      const blobUrl = URL.createObjectURL(blob);
+      const mesh = applyTransform(new SplatMesh({ url: blobUrl }));
+      scene.add(mesh);
+      loadedMeshes.push(mesh);
+
+      setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+
+
+      return mesh;
+    }
+
+
+    async function startProgressiveLoading() {
+        try {
+           
+            await loadAndAddLayer(LAYERS[0]);
+
+
+            for (let i = 1; i < LAYERS.length; i++) {
+                await loadAndAddLayer(LAYERS[i]);
+            }
+
+            setStatus("Done: full quality reached");
+        } catch (e) {
+            console.error(e);
+            setStatus(`Load error\n${e.message}`);
+        }
+    }
+
+    startProgressiveLoading();
+
+
+    // -----------------------------
+    // WebXR hand tracking + SDF edits (unchanged)
+    // -----------------------------
+    const vrButton = VRButton.createButton(renderer, {
+      optionalFeatures: ["hand-tracking"],
+    });
+
+    let xrHands = null;
+    if (vrButton) {
+      document.body.appendChild(vrButton);
+
+      xrHands = new XrHands();
+      const handMesh = xrHands.makeGhostMesh();
+      handMesh.editable = false;
+      localFrame.add(handMesh);
+    }
+
+    const edit = new SplatEdit({
+      rgbaBlendMode: SplatEditRgbaBlendMode.ADD_RGBA,
+      sdfSmooth: 0.02,
+      softEdge: 0.02,
+    });
+    localFrame.add(edit);
+
+    const sdfs = new Map();
+    let lastCameraPos = new THREE.Vector3(0, 0, 0);
+
+    renderer.setAnimationLoop(function animate(time, xrFrame) {
+      if (lastCameraPos.distanceTo(camera.position) > 0.5) {
+        localFrame.position.copy(camera.position).multiplyScalar(-1);
+      }
+      lastCameraPos.copy(camera.position);
+
+      if (xrHands) {
+        xrHands.update({ xr: renderer.xr, xrFrame });
+
+        for (const hand of ["left", "right"]) {
+          for (const [index, tip] of ["t3", "i4", "m4", "r4", "p4"].entries()) {
+            const key = `${hand}-${tip}`;
+            if (!sdfs.has(key)) {
+              const sdf = new SplatEditSdf({
+                type: SplatEditSdfType.SPHERE,
+                radius: 0.03,
+                color: new THREE.Color(
+                  (index % 5 < 3) ? 1 : 0,
+                  (index % 5 % 2),
+                  ((index % 5) > 1) ? 1 : 0
+                ),
+                opacity: 0,
+              });
+              sdfs.set(key, sdf);
+            }
+
+            const sdf = sdfs.get(key);
+            sdf.displace.set(
+              0.01 * Math.sin(time * 0.007 + index * 1),
+              0.01 * Math.sin(time * 0.002 + index * 2),
+              0.01 * Math.sin(time * 0.009 + index * 3),
+            );
+
+            if (xrHands.hands[hand] && xrHands.hands[hand][tip]) {
+              sdf.position.copy(xrHands.hands[hand][tip].position);
+              edit.add(sdf);
+            } else {
+              edit.remove(sdf);
+            }
+          }
+        }
+      }
+
+      renderer.render(scene, camera);
+    });
+  </script>
+</body>
+
+</html>
