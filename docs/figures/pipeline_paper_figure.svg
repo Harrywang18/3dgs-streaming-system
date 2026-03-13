@@ -36,7 +36,7 @@
   <rect x="1130" y="70" width="390" height="130" class="boxC"/>
   <text x="1325" y="102" text-anchor="middle" class="label">Stage C: Spark (Web/WebXR)</text>
   <text x="1150" y="132" class="small">• Progressive fetch using voxel_ilp.json</text>
-  <text x="1150" y="156" class="small">• Viewpoint-aware decode & rendering</text>
+  <text x="1150" y="156" class="small">• Viewpoint-aware decode &amp; rendering</text>
   <text x="1150" y="180" class="small">Output: Interactive 6DoF streaming</text>
 
   <rect x="690" y="260" width="260" height="70" class="io"/>
