@@ -1,0 +1,51 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1600" height="420" viewBox="0 0 1600 420">
+  <defs>
+    <style>
+      .title{font:700 24px Arial; fill:#111}
+      .label{font:600 16px Arial; fill:#111}
+      .small{font:500 14px Arial; fill:#222}
+      .boxA{fill:#eef4ff;stroke:#4b72d9;stroke-width:2;rx:14;ry:14}
+      .boxB{fill:#eefcf3;stroke:#36a269;stroke-width:2;rx:14;ry:14}
+      .boxC{fill:#fff6ea;stroke:#db8c23;stroke-width:2;rx:14;ry:14}
+      .io{fill:#f8f8f8;stroke:#666;stroke-width:1.5;rx:10;ry:10}
+      .arrow{stroke:#333;stroke-width:2.2;marker-end:url(#m)}
+    </style>
+    <marker id="m" markerWidth="10" markerHeight="10" refX="8" refY="5" orient="auto">
+      <path d="M0,0 L10,5 L0,10 z" fill="#333"/>
+    </marker>
+  </defs>
+
+  <text x="30" y="40" class="title">End-to-end Pipeline of 3DGS-Streaming-System</text>
+
+  <rect x="30" y="90" width="200" height="90" class="io"/>
+  <text x="55" y="128" class="label">Multi-view Images</text>
+  <text x="72" y="152" class="small">+ Camera Poses</text>
+
+  <rect x="280" y="70" width="360" height="130" class="boxA"/>
+  <text x="420" y="102" text-anchor="middle" class="label">Stage A: Lapis-GS</text>
+  <text x="300" y="132" class="small">• Multi-resolution dataset preparation</text>
+  <text x="300" y="156" class="small">• 3DGS training (non-layered / layered)</text>
+  <text x="300" y="180" class="small">Output: scene-level Gaussian PLY</text>
+
+  <rect x="690" y="70" width="390" height="130" class="boxB"/>
+  <text x="885" y="102" text-anchor="middle" class="label">Stage B: SGSS</text>
+  <text x="710" y="132" class="small">• Voxelization + matrix construction</text>
+  <text x="710" y="156" class="small">• ILP-based spatial optimization</text>
+  <text x="710" y="180" class="small">• Cuboid extraction (+ optional layer split)</text>
+
+  <rect x="1130" y="70" width="390" height="130" class="boxC"/>
+  <text x="1325" y="102" text-anchor="middle" class="label">Stage C: Spark (Web/WebXR)</text>
+  <text x="1150" y="132" class="small">• Progressive fetch using voxel_ilp.json</text>
+  <text x="1150" y="156" class="small">• Viewpoint-aware decode &amp; rendering</text>
+  <text x="1150" y="180" class="small">Output: Interactive 6DoF streaming</text>
+
+  <rect x="690" y="260" width="260" height="70" class="io"/>
+  <text x="820" y="289" text-anchor="middle" class="small">Cuboid PLYs / Cuboid×Layer PLYs</text>
+  <text x="820" y="311" text-anchor="middle" class="small">+ voxel_ilp.json</text>
+
+  <line x1="230" y1="135" x2="280" y2="135" class="arrow"/>
+  <line x1="640" y1="135" x2="690" y2="135" class="arrow"/>
+  <line x1="1080" y1="135" x2="1130" y2="135" class="arrow"/>
+  <line x1="885" y1="200" x2="885" y2="260" class="arrow"/>
+  <line x1="950" y1="295" x2="1130" y2="190" class="arrow"/>
+</svg>
